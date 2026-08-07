@@ -16,6 +16,7 @@ void LightSensor_Init(void) {
         .bitwidth = ADC_BITWIDTH_12,
     };
     adc_oneshot_config_channel(adc_handle, LIGHT_ADC_CHANNEL, &chan_cfg);
+
 }
 
 int LightSensor_GetRaw(void) {
@@ -26,5 +27,10 @@ int LightSensor_GetRaw(void) {
 
 float LightSensor_GetNormalized(void) {
     int raw = LightSensor_GetRaw();
-    return 1.0f - ((float)raw / 4095.0f);
+
+    float normalized = 1.0f - ((float)raw / 4095.0f);
+    if (normalized < 0.0f) normalized = 0.0f;
+    if (normalized > 1.0f) normalized = 1.0f;
+
+    return normalized;
 }

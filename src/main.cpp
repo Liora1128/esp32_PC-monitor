@@ -1,91 +1,202 @@
-#include <stdio.h>
+#include <LovyanGFX.hpp>
+#include "1_3TFT.h"
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "driver/gpio.h"
-#include "esp_log.h"
-#include <LovyanGFX.hpp>
-#include <driver/spi_master.h>
 
-#include "1_3TFT.h"
-#include "LightSensor.h"
+#include "lvgl.h"
 
-static const char* TAG = "main";
+static LGFX_ESP32ST7789 tft;
 
-LGFX_ESP32ST7789 tft;
+static lv_disp_draw_buf_t draw_buf;
+static lv_color_t buf[2][240 * 10];
 
-// 彩虹渐变色条
-void drawRainbowBar(int y, int h) {
-    for (int i = 0; i < h; i++) {
-        int color = tft.color888(i * 255 / h, 255 - i * 255 / h, 128 + i * 127 / h);
-        tft.drawFastHLine(0, y + i, 240, color);
-    }
+static lv_obj_t * hour_label;
+static lv_obj_t * min_label;
+static lv_obj_t * sec_label;
+static lv_obj_t * date_label;
+static lv_obj_t * ampm_label;
+
+/* Display flushing */
+void my_disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color_p)
+{
+    uint32_t w = area->x2 - area->x1 + 1;
+    uint32_t h = area->y2 - area->y1 + 1;
+    tft.pushImageDMA(area->x1, area->y1, w, h, (uint16_t *)&color_p->full);
+    lv_disp_flush_ready(disp);
 }
 
-// 演示画面
-void demoScreen(void) {
-    tft.fillScreen(TFT_BLACK);
+void update_clock()
+{
+    time_t now = time(NULL);
+    struct tm *t = localtime(&now);
 
-    // 标题
-    tft.setTextColor(TFT_CYAN, TFT_BLACK);
-    tft.setTextSize(2);
-    tft.setCursor(0, 0);
-    tft.println("Light Sensor Demo");
+    int hour = t->tm_hour;
+    int min = t->tm_min;
+    int sec = t->tm_sec;
 
-    // 彩虹条
-    drawRainbowBar(20, 30);
+    // Format hour
+    static char h_buf[3];
+    if (hour == 0) hour = 12;
+    else if (hour > 12) hour -= 12;
+    h_buf[0] = '0' + hour / 10;
+    h_buf[1] = '0' + hour % 10;
+    h_buf[2] = '\0';
 
-    // 矩形
-    tft.drawRect(10, 60, 100, 50, TFT_RED);
-    tft.fillRect(120, 60, 100, 50, TFT_GREEN);
-    tft.drawRoundRect(10, 120, 100, 50, 8, TFT_BLUE);
-    tft.fillRoundRect(120, 120, 100, 50, 8, TFT_YELLOW);
+    // Format min/sec
+    static char m_buf[3], s_buf[3];
+    m_buf[0] = '0' + min / 10;
+    m_buf[1] = '0' + min % 10;
+    m_buf[2] = '\0';
+    s_buf[0] = '0' + sec / 10;
+    s_buf[1] = '0' + sec % 10;
+    s_buf[2] = '\0';
 
-    // 圆形
-    tft.drawCircle(60, 200, 30, TFT_MAGENTA);
-    tft.fillCircle(180, 200, 30, TFT_CYAN);
+    lv_label_set_text(hour_label, h_buf);
+    lv_label_set_text(min_label, m_buf);
+    lv_label_set_text(sec_label, s_buf);
 
-    // 文字
-    tft.setTextColor(TFT_WHITE, TFT_BLACK);
-    tft.setTextSize(1);
-    tft.setCursor(0, 240 - 16);
-    tft.print("ESP32-S3 ST7789");
+    // AM/PM
+    static char ampm[3];
+    t->tm_hour >= 12 ? strcpy(ampm, "PM") : strcpy(ampm, "AM");
+    lv_label_set_text(ampm_label, ampm);
+
+    // Date
+    static const char *days[] = {"SUN","MON","TUE","WED","THU","FRI","SAT"};
+    static const char *months[] = {"JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"};
+    static char date_buf[32];
+    sprintf(date_buf, "%s  %s  %02d", days[t->tm_wday], months[t->tm_mon], t->tm_mday);
+    lv_label_set_text(date_label, date_buf);
 }
 
-extern "C" void app_main(void) {
-    ESP_LOGI(TAG, "TFT + Light Sensor Demo starting...");
+void clock_timer_cb(lv_timer_t *timer)
+{
+    (void)timer;
+    update_clock();
+}
 
-    // 初始化光敏传感器（ADC GPIO1）
-    LightSensor_Init();
-
-    // 初始化屏幕
-    ESP_LOGI(TAG, "Init TFT...");
+extern "C"
+void app_main()
+{
     tft.reset();
-    ESP_LOGI(TAG, "Init Backlight...");
-    TFT_BL_Init();
-    ESP_LOGI(TAG, "Init LovyanGFX...");
     tft.init();
+    TFT_BL_Init();
+    TFT_BL_SetBrightness(1.0);
 
-    // 显示初始画面
-    demoScreen();
+    setenv("TZ", "CST-8", 1);
+    tzset();
 
-    // 设置初始亮度
-    float initial_light = LightSensor_GetNormalized();
-    TFT_BL_SetBrightness(initial_light);
-    ESP_LOGI(TAG, "Initial light: %.2f, brightness: %.2f", initial_light, initial_light);
+    struct tm t;
+    t.tm_year = 2026 - 1900;
+    t.tm_mon = 7;
+    t.tm_mday = 7;
+    t.tm_hour = 12;
+    t.tm_min = 0;
+    t.tm_sec = 0;
+    t.tm_isdst = 0;
+    time_t ts = mktime(&t);
+    struct timeval tv = { .tv_sec = ts, .tv_usec = 0 };
+    settimeofday(&tv, NULL);
 
-    ESP_LOGI(TAG, "Auto brightness control started...");
+    lv_init();
 
-    // 主循环：读取光敏传感器，调节屏幕亮度
+    lv_disp_draw_buf_init(&draw_buf, buf[0], buf[1], 240 * 10);
+
+    static lv_disp_drv_t disp_drv;
+    lv_disp_drv_init(&disp_drv);
+    disp_drv.hor_res = 240;
+    disp_drv.ver_res = 240;
+    disp_drv.flush_cb = my_disp_flush;
+    disp_drv.draw_buf = &draw_buf;
+    lv_disp_drv_register(&disp_drv);
+
+    // ===== Background =====
+    lv_obj_set_style_bg_color(lv_scr_act(), lv_color_make(5, 5, 15), 0);
+
+    // ===== Top decoration circle =====
+    lv_obj_t * top_circle = lv_obj_create(lv_scr_act());
+    lv_obj_set_size(top_circle, 120, 120);
+    lv_obj_set_style_radius(top_circle, 60, 0);
+    lv_obj_set_style_bg_color(top_circle, lv_color_make(20, 20, 50), 0);
+    lv_obj_set_style_border_width(top_circle, 2, 0);
+    lv_obj_set_style_border_color(top_circle, lv_color_make(0, 180, 255), 0);
+    lv_obj_align(top_circle, LV_ALIGN_TOP_MID, 0, 5);
+
+    // ===== Clock panel =====
+    lv_obj_t * clock_panel = lv_obj_create(lv_scr_act());
+    lv_obj_set_size(clock_panel, 220, 110);
+    lv_obj_set_style_bg_color(clock_panel, lv_color_make(10, 10, 25), 0);
+    lv_obj_set_style_border_width(clock_panel, 1, 0);
+    lv_obj_set_style_border_color(clock_panel, lv_color_make(0, 120, 200), 0);
+    lv_obj_set_style_radius(clock_panel, 12, 0);
+    lv_obj_align(clock_panel, LV_ALIGN_CENTER, 0, -15);
+
+    // Hour
+    hour_label = lv_label_create(clock_panel);
+    lv_label_set_text(hour_label, "00");
+    lv_obj_set_style_text_font(hour_label, &lv_font_montserrat_32, 0);
+    lv_obj_set_style_text_color(hour_label, lv_color_make(0, 220, 255), 0);
+    lv_obj_align(hour_label, LV_ALIGN_CENTER, -60, 0);
+
+    // Colon
+    lv_obj_t * col1 = lv_label_create(clock_panel);
+    lv_label_set_text(col1, ":");
+    lv_obj_set_style_text_font(col1, &lv_font_montserrat_32, 0);
+    lv_obj_set_style_text_color(col1, lv_color_make(255, 140, 0), 0);
+    lv_obj_align(col1, LV_ALIGN_CENTER, -20, 0);
+
+    // Minute
+    min_label = lv_label_create(clock_panel);
+    lv_label_set_text(min_label, "00");
+    lv_obj_set_style_text_font(min_label, &lv_font_montserrat_32, 0);
+    lv_obj_set_style_text_color(min_label, lv_color_make(0, 220, 255), 0);
+    lv_obj_align(min_label, LV_ALIGN_CENTER, 15, 0);
+
+    // Colon
+    lv_obj_t * col2 = lv_label_create(clock_panel);
+    lv_label_set_text(col2, ":");
+    lv_obj_set_style_text_font(col2, &lv_font_montserrat_32, 0);
+    lv_obj_set_style_text_color(col2, lv_color_make(255, 140, 0), 0);
+    lv_obj_align(col2, LV_ALIGN_CENTER, 50, 0);
+
+    // Second
+    sec_label = lv_label_create(clock_panel);
+    lv_label_set_text(sec_label, "00");
+    lv_obj_set_style_text_font(sec_label, &lv_font_montserrat_32, 0);
+    lv_obj_set_style_text_color(sec_label, lv_color_make(255, 140, 0), 0);
+    lv_obj_align(sec_label, LV_ALIGN_CENTER, 85, 0);
+
+    // AM/PM label
+    ampm_label = lv_label_create(clock_panel);
+    lv_label_set_text(ampm_label, "PM");
+    lv_obj_set_style_text_font(ampm_label, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(ampm_label, lv_color_make(0, 180, 255), 0);
+    lv_obj_align(ampm_label, LV_ALIGN_CENTER, 0, -42);
+
+    // ===== Date =====
+    date_label = lv_label_create(lv_scr_act());
+    lv_label_set_text(date_label, "FRI  AUG  07");
+    lv_obj_set_style_text_font(date_label, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(date_label, lv_color_make(150, 150, 180), 0);
+    lv_obj_align(date_label, LV_ALIGN_CENTER, 0, 75);
+
+    // ===== Bottom dots decoration =====
+    for (int i = 0; i < 5; i++) {
+        lv_obj_t * dot = lv_obj_create(lv_scr_act());
+        lv_obj_set_size(dot, 6, 6);
+        lv_obj_set_style_radius(dot, 3, 0);
+        lv_obj_set_style_bg_color(dot, lv_color_make(0, 120, 200), 0);
+        lv_obj_align(dot, LV_ALIGN_BOTTOM_MID, (i - 2) * 15, -15);
+    }
+
+    update_clock();
+    lv_timer_create(clock_timer_cb, 1000, NULL);
+
+    printf("LVGL Digital Clock started\n");
+
     while (1) {
-        // 读取光敏传感器值 (0.0 - 1.0)
-        float light = LightSensor_GetNormalized();
-        light = light * 0.7f + 0.3f;
-
-        // 设置屏幕亮度
-        TFT_BL_SetBrightness(light);
-
-        // ESP_LOGI(TAG, "Light: %.2f, Brightness: %.2f%%", light, light * 100);
-
-        vTaskDelay(pdMS_TO_TICKS(200));  // 每200ms更新一次
+        lv_tick_inc(10);
+        lv_timer_handler();
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
