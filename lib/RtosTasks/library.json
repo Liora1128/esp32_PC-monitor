@@ -1,0 +1,7 @@
+{
+    "name": "RtosTasks",
+    "version": "1.0.0",
+    "description": "FreeRTOS tasks for the ESP32S3 watch UI (button polling).",
+    "headers": ["freertos.h"],
+    "srcDir": "."
+}

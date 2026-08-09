@@ -38,6 +38,7 @@
 #define LV_FONT_MONTSERRAT_16    1
 #define LV_FONT_MONTSERRAT_32    1
 #define LV_FONT_MONTSERRAT_14    1
+#define LV_FONT_MONTSERRAT_48    1
 
 #define LV_DISP_DEF_REFR_PERIOD     50
 

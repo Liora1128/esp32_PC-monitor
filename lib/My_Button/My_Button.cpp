@@ -38,8 +38,18 @@ static Button_t* alloc_pin(gpio_num_t pin) {
 }
 
 void My_Button_Init(void) {
-    gpio_set_direction(GPIO_NUM_0, GPIO_MODE_INPUT);
-    gpio_set_pull_mode(GPIO_NUM_0, GPIO_PULLUP_ONLY);
+    // Pre-register the three buttons used by the clock menu.
+    // GPIO 1 = menu (bottom-left), GPIO 2 = back, GPIO 42 = settings (bottom-right)
+    gpio_num_t pins[] = { GPIO_NUM_1, GPIO_NUM_2, GPIO_NUM_42 };
+    for (int i = 0; i < 3; i++) {
+        gpio_set_direction(pins[i], GPIO_MODE_INPUT);
+        gpio_set_pull_mode(pins[i], GPIO_PULLUP_ONLY);
+        // force registration
+        (void)alloc_pin(pins[i]);
+        s_btns[i].last_level = 1;
+        s_btns[i].state = 0;
+        s_btns[i].double_ready = 0;
+    }
 }
 
 KeyState My_Button_Scan(gpio_num_t pin) {

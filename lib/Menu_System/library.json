@@ -1,0 +1,8 @@
+{
+    "name": "Menu_System",
+    "version": "1.0.0",
+    "description": "Smartwatch-style carousel menu with apps.",
+    "headers": ["Menu_System.h"],
+    "dependencies": ["lvgl"],
+    "srcDir": "."
+}
