@@ -19,6 +19,7 @@
 #include "Weather.h"
 #include "My_Button.h"
 #include "lib\RtosTasks\freertos.h"
+#include "Dashboard.h"
 
 #include "App_Music.h"
 #include "App_Games.h"
@@ -83,18 +84,10 @@ extern "C" void app_main(void)
     seed_clock();
     lvgl_init();
 
-    ClockUI_Build();
-
-    // Register the smartwatch apps in carousel order.
-    MenuSystem_RegisterApp(&App_Music);
-    MenuSystem_RegisterApp(&App_Games);
-    MenuSystem_RegisterApp(&App_Stopwatch);
-    MenuSystem_RegisterApp(&App_Flashlight);
-    MenuSystem_RegisterApp(&App_Weather);
-    MenuSystem_RegisterApp(&App_Settings);
-    MenuSystem_Build();
-
-    ClockUI_StartAutoRefresh(1000);
+    // Build the PC-monitor Dashboard UI. It also starts its own UDP
+    // listener (port 9999) that updates the data fields from JSON
+    // pushed by the PC.
+    Dashboard_Start();
 
     // Let the display fully render before background work starts.
     vTaskDelay(pdMS_TO_TICKS(3000));
