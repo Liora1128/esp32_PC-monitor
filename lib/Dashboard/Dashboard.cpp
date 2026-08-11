@@ -149,11 +149,16 @@ static void build_page_system(void)
     char buf[16];
     lv_snprintf(buf, sizeof(buf), "%lu", (unsigned long)s_cpu);
     s_cpu_pct_label = mk_lbl(p, &lv_font_montserrat_48, COL_TEXT, buf);
-    // 此处修改cpu百分比数值位置
-    lv_obj_align_to(s_cpu_pct_label,s_cpu_arc, LV_ALIGN_CENTER, 0, 0);
+    // 设置 label 宽度等于圆弧内径，并把文字在 label 内水平居中
+    lv_obj_set_size(s_cpu_pct_label, 110, LV_SIZE_CONTENT);
+    lv_label_set_long_mode(s_cpu_pct_label, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_align(s_cpu_pct_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align_to(s_cpu_pct_label, s_cpu_arc, LV_ALIGN_CENTER, 0, -4);
     {
         lv_obj_t *cpu_cap = mk_lbl(p, &lv_font_montserrat_14, COL_DIM, "CPU %");
-        lv_obj_align_to(cpu_cap,s_cpu_arc, LV_ALIGN_CENTER, 0, 32);
+        lv_obj_set_size(cpu_cap, 110, LV_SIZE_CONTENT);
+        lv_obj_set_style_text_align(cpu_cap, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_align_to(cpu_cap, s_cpu_arc, LV_ALIGN_CENTER, 0, 32);
     }
 
     // ---- Top-right: UPTIME + CPU FREQ ----
