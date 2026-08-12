@@ -3,3 +3,10 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+
+# ESP-IDF / PlatformIO auto-generated
+sdkconfig
+sdkconfig.old
+
+# PyInstaller auto-generated (re-created by main.py --pack)
+pc_monitor_server.spec

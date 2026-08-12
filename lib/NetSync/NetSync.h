@@ -2,6 +2,7 @@
 #define NETSYNC_H
 
 #include <stdint.h>
+#include <stddef.h>
 
 // Snapshot of the latest PC stats received over UDP.
 // Updated by the background recv task; read from any context.
