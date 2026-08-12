@@ -77,70 +77,39 @@ static void lvgl_init(void)
 }
 
 // ============================================================
-// BOOT 长按监控
+// BOOT 长按 5s 清 WiFi 任务
 //
-// GPIO1：
-//   按下 = 低电平
-//   松开 = 高电平
+// 这里不再自己做 GPIO 轮询 / ISR，全部依赖 My_Button 中断驱动：
+//   - GPIO1 (BOOT) 已经被 My_Button_Init() 装好了双边沿 ISR
+//   - 按住 5s 后 My_Button 会推一个 KEY_HOLD_5S 事件到队列
+//   - 本任务阻塞读，拿到这个事件就清 NVS 凭据 + esp_restart()
 //
-// 长按 5 秒：
-//   清除保存的 Wi-Fi
-//   重启
-//   重启后自动进入配网模式
+// CPU 不轮询，My_Button 的 esp_timer 5s 触发后自动唤醒这里。
 // ============================================================
 
-static void boot_button_task(void *arg)
+static void boot_hold_task(void *arg)
 {
     (void)arg;
 
-    const uint32_t HOLD_MS = 5000;
-    const uint32_t POLL_MS = 50;
-
-    uint32_t held_ms = 0;
-
-    const gpio_num_t BOOT =
-        GPIO_NUM_1;
-
+    KeyEvent ev;
     while (1) {
+        KeyState st = My_Button_GetEvent(&ev, portMAX_DELAY);
+        if (st != KEY_HOLD_5S) continue;
 
-        if (gpio_get_level(BOOT) == 0) {
+        // 只对 BOOT (GPIO1) 关心，其它 pin 上的 KEY_HOLD_5S 忽略
+        // （理论上三个 pin 都能触发，但只有 BOOT 配 NVS 操作）。
+        if (ev.pin != GPIO_NUM_1) continue;
 
-            held_ms += POLL_MS;
+        ESP_LOGW("main", "BOOT held for 5 seconds");
+        ESP_LOGW("main", "clearing saved Wi-Fi credentials");
 
-            if (held_ms >= HOLD_MS) {
+        WifiProvision_ClearCredentials();
 
-                ESP_LOGW(
-                    "main",
-                    "BOOT held for 5 seconds"
-                );
+        vTaskDelay(pdMS_TO_TICKS(100));
 
-                ESP_LOGW(
-                    "main",
-                    "clearing saved Wi-Fi credentials"
-                );
+        ESP_LOGW("main", "restarting into provisioning mode");
 
-                WifiProvision_ClearCredentials();
-
-                vTaskDelay(
-                    pdMS_TO_TICKS(100)
-                );
-
-                ESP_LOGW(
-                    "main",
-                    "restarting into provisioning mode"
-                );
-
-                esp_restart();
-            }
-
-        } else {
-
-            held_ms = 0;
-        }
-
-        vTaskDelay(
-            pdMS_TO_TICKS(POLL_MS)
-        );
+        esp_restart();
     }
 }
 
@@ -189,60 +158,28 @@ extern "C" void app_main(void)
     );
 
     // --------------------------------------------------------
-    // 3. 配置 BOOT 按键
+    // 3. 启动 BOOT 5s 长按监听任务
     //
-    // GPIO1 上拉输入
-    // 按下接地 = 0
-    // 长按 5 秒清除 Wi-Fi 并重启
+    // 5s 长按的 GPIO 边沿检测、定时全部由 My_Button 中断模块完成，
+    // 这里只需要一个轻量 task 订阅 KEY_HOLD_5S 事件去清 WiFi。
+    //
+    // 注意：My_Button_Init() 已经在步骤 1 里把 GPIO 1 装好了
+    // 输入上拉 + 双边沿 ISR + 5s esp_timer, 这里不需要再做任何
+    // GPIO 配置。
     // --------------------------------------------------------
 
-    const gpio_num_t BOOT =
-        GPIO_NUM_1;
-
-    gpio_config_t io = {
-        .pin_bit_mask =
-            (1ULL << BOOT),
-
-        .mode =
-            GPIO_MODE_INPUT,
-
-        .pull_up_en =
-            GPIO_PULLUP_ENABLE,
-
-        .pull_down_en =
-            GPIO_PULLDOWN_DISABLE,
-
-        .intr_type =
-            GPIO_INTR_DISABLE,
-    };
-
-    esp_err_t gpio_err =
-        gpio_config(&io);
-
-    if (gpio_err != ESP_OK) {
-
-        ESP_LOGE(
-            "main",
-            "BOOT GPIO config failed: %s",
-            esp_err_to_name(gpio_err)
-        );
-
-    } else {
-
-        ESP_LOGI(
-            "main",
-            "BOOT button configured on GPIO1"
-        );
-    }
-
-    // 启动 BOOT 长按检测任务
     xTaskCreate(
-        boot_button_task,
-        "btn_watch",
+        boot_hold_task,
+        "boot_hold",
         2048,
         NULL,
         1,
         NULL
+    );
+
+    ESP_LOGI(
+        "main",
+        "BOOT 5s hold handler armed (subscribed to My_Button KEY_HOLD_5S)"
     );
 
     // --------------------------------------------------------
