@@ -33,6 +33,18 @@
 
 static const char *TAG = "net";
 
+// ============================================================
+// 网络状态
+// ============================================================
+
+static volatile NetSync_State s_net_state =
+    NETSYNC_STATE_STARTING;
+
+NetSync_State NetSync_GetState(void)
+{
+    return s_net_state;
+}
+
 static EventGroupHandle_t s_wifi_event_group;
 
 #define WIFI_CONNECTED_BIT BIT0
@@ -892,6 +904,8 @@ static void hello_task(
 
 void NetSync_StartBackground(void)
 {
+    s_net_state =
+        NETSYNC_STATE_STARTING;
     ESP_LOGI(
         TAG,
         "network subsystem start"
@@ -944,59 +958,100 @@ void NetSync_StartBackground(void)
             "entering provisioning mode"
         );
 
-        WifiProvision_StartAP();
+        s_net_state =
+            NETSYNC_STATE_PROVISIONING;
 
-        return;
+        // ----------------------------------------------------
+        // 这里会一直运行配网。
+        // 配网成功后才返回。
+        // ----------------------------------------------------
+
+        bool provision_ok =
+            WifiProvision_StartAP();
+
+        if (!provision_ok)
+        {
+            ESP_LOGE(
+                TAG,
+                "Wi-Fi provisioning failed"
+            );
+
+            return;
+        }
+
+        // ----------------------------------------------------
+        // 配网成功
+        //
+        // 此时：
+        //   NVS 已保存
+        //   STA 已连接
+        //   AP 已关闭
+        // ----------------------------------------------------
+
+        ESP_LOGI(
+            TAG,
+            "provisioning successful"
+        );
+
+        s_net_state =
+            NETSYNC_STATE_READY;
     }
+    else
+    {
+        // ----------------------------------------------------
+        // 已经有保存的 Wi-Fi
+        // ----------------------------------------------------
 
-    ESP_LOGI(
-        TAG,
-        "saved Wi-Fi found: %s",
-        ssid
-    );
-
-    // --------------------------------------------------------
-    // 连接保存的 Wi-Fi
-    // --------------------------------------------------------
-
-    if (
-        !wifi_connect_blocking(
-            ssid,
-            pass
-        )
-    ) {
-
-        /*
-         * 保存的 Wi-Fi 已经不能使用。
-         *
-         * 这里清除旧配置并重启，
-         * 重启后自然进入配网模式。
-         */
-
-        ESP_LOGW(
+        ESP_LOGI(
             TAG,
-            "saved Wi-Fi failed"
+            "saved Wi-Fi found: %s",
+            ssid
         );
 
-        WifiProvision_ClearCredentials();
+        s_net_state =
+            NETSYNC_STATE_CONNECTING;
 
-        ESP_LOGW(
-            TAG,
-            "credentials cleared, rebooting into provisioning mode"
-        );
+        // ----------------------------------------------------
+        // 正常连接
+        // ----------------------------------------------------
 
-        vTaskDelay(
-            pdMS_TO_TICKS(500)
-        );
+        if (
+            !wifi_connect_blocking(
+                ssid,
+                pass
+            )
+        ) {
 
-        esp_restart();
+            ESP_LOGW(
+                TAG,
+                "saved Wi-Fi failed"
+            );
 
-        return;
+            WifiProvision_ClearCredentials();
+
+            ESP_LOGW(
+                TAG,
+                "credentials cleared, rebooting into provisioning mode"
+            );
+
+            vTaskDelay(
+                pdMS_TO_TICKS(500)
+            );
+
+            esp_restart();
+
+            return;
+        }
+
+        s_net_state =
+            NETSYNC_STATE_READY;
     }
 
     // --------------------------------------------------------
     // Wi-Fi 正常连接后，启动业务 UDP
     // --------------------------------------------------------
+
+    s_net_state = NETSYNC_STATE_READY;
 
     ESP_LOGI(
         TAG,

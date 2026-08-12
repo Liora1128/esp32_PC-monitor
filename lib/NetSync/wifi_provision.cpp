@@ -1,4 +1,5 @@
 #include "wifi_provision.h"
+#include "ProvisionUI.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -30,7 +31,7 @@ static const char *TAG = "wifi_prov";
 #define PROV_DNS_PORT 53
 #define PROV_HTTP_PORT 80
 
-#define VERIFY_TIMEOUT_MS 15000
+#define VERIFY_TIMEOUT_MS 30000
 #define STATUS_POLL_MS 500
 
 #define MAX_SCAN_AP 32
@@ -801,181 +802,356 @@ static bool try_sta_connect(
 
     verify_state_t st = {
         .got_ip = false,
-        .result = VERIFY_NONE};
+        .result = VERIFY_NONE
+    };
 
     esp_event_handler_instance_t h_disconnect = NULL;
     esp_event_handler_instance_t h_got_ip = NULL;
 
     esp_err_t err = ESP_OK;
 
-    // 必须放在所有 goto 之前
+    // 已经等待的时间，单位 ms
     int waited = 0;
+
+    // 提到 goto 之前，避免跨越初始化
+    bool retry_done = false;
+
+    // ========================================================
+    // 注册 Wi-Fi 断开事件
+    // ========================================================
 
     err = esp_event_handler_instance_register(
         WIFI_EVENT,
         WIFI_EVENT_STA_DISCONNECTED,
         &verify_event_handler,
         &st,
-        &h_disconnect);
+        &h_disconnect
+    );
 
     if (err != ESP_OK)
     {
         ESP_LOGE(
             TAG,
             "register disconnect handler failed: %s",
-            esp_err_to_name(err));
+            esp_err_to_name(err)
+        );
+
+        *out_result = VERIFY_OTHER;
 
         return false;
     }
+
+    // ========================================================
+    // 注册 GOT_IP 事件
+    // ========================================================
 
     err = esp_event_handler_instance_register(
         IP_EVENT,
         IP_EVENT_STA_GOT_IP,
         &verify_event_handler,
         &st,
-        &h_got_ip);
+        &h_got_ip
+    );
 
     if (err != ESP_OK)
     {
-
         esp_event_handler_instance_unregister(
             WIFI_EVENT,
             WIFI_EVENT_STA_DISCONNECTED,
-            h_disconnect);
+            h_disconnect
+        );
 
         ESP_LOGE(
             TAG,
             "register got_ip handler failed: %s",
-            esp_err_to_name(err));
+            esp_err_to_name(err)
+        );
+
+        *out_result = VERIFY_OTHER;
 
         return false;
     }
 
-    // 先断开上一轮连接
+    // ========================================================
+    // 保持原来的 APSTA 配网结构
+    //
+    // 这里不要切换 WIFI_MODE_STA。
+    // 手机仍然连接着 PCMonitor-Setup，
+    // ESP32 同时使用 STA 去连接目标 Wi-Fi。
+    // ========================================================
+
+    // 先断开可能存在的旧 STA 连接
     esp_wifi_disconnect();
 
     vTaskDelay(
-        pdMS_TO_TICKS(200));
+        pdMS_TO_TICKS(200)
+    );
+
+    // ========================================================
+    // 设置目标 Wi-Fi
+    // ========================================================
 
     wifi_config_t wc = {};
 
     strncpy(
         (char *)wc.sta.ssid,
         ssid,
-        sizeof(wc.sta.ssid) - 1);
+        sizeof(wc.sta.ssid) - 1
+    );
 
     if (pass)
     {
         strncpy(
             (char *)wc.sta.password,
             pass,
-            sizeof(wc.sta.password) - 1);
+            sizeof(wc.sta.password) - 1
+        );
     }
 
-    // 不强制 WPA2，兼容开放网络/WPA/WPA2 等实际扫描结果。
+    // 不强制 WPA2
     wc.sta.pmf_cfg.capable = true;
     wc.sta.pmf_cfg.required = false;
 
     err = esp_wifi_set_config(
         WIFI_IF_STA,
-        &wc);
+        &wc
+    );
 
     if (err != ESP_OK)
     {
-
         ESP_LOGE(
             TAG,
             "esp_wifi_set_config failed: %s",
-            esp_err_to_name(err));
+            esp_err_to_name(err)
+        );
+
+        *out_result = VERIFY_OTHER;
 
         goto cleanup_fail;
     }
+
+    // ========================================================
+    // 第一次连接
+    // ========================================================
+
+    ESP_LOGI(
+        TAG,
+        "verify: connecting to '%s'",
+        ssid
+    );
 
     err = esp_wifi_connect();
 
     if (err != ESP_OK)
     {
-
         ESP_LOGE(
             TAG,
             "esp_wifi_connect failed: %s",
-            esp_err_to_name(err));
+            esp_err_to_name(err)
+        );
+
+        *out_result = VERIFY_OTHER;
 
         goto cleanup_fail;
     }
 
+    // ========================================================
+    // 等待连接
+    //
+    // 最长 30 秒。
+    //
+    // 5 秒后如果还没有 GOT_IP，
+    // 自动再调用一次 esp_wifi_connect()。
+    //
+    // 这样可以处理第一次连接比较慢的情况，
+    // 同时不会关闭配网 AP。
+    // ========================================================
+
     while (waited < timeout_ms)
     {
+        // ----------------------------------------------------
+        // 成功拿到 IP
+        // ----------------------------------------------------
 
         if (st.got_ip)
         {
-
             ESP_LOGI(
                 TAG,
-                "verify: Wi-Fi connected successfully");
+                "verify: Wi-Fi connected successfully"
+            );
 
             *out_result = VERIFY_OK;
 
             goto cleanup_success;
         }
 
-        if (st.result == VERIFY_AUTH_FAIL ||
-            st.result == VERIFY_NO_AP ||
-            st.result == VERIFY_ASSOC_FAIL)
-        {
+        // ----------------------------------------------------
+        // 明确的认证失败
+        // ----------------------------------------------------
 
-            *out_result = st.result;
+        if (st.result == VERIFY_AUTH_FAIL)
+        {
+            *out_result = VERIFY_AUTH_FAIL;
 
             ESP_LOGW(
                 TAG,
-                "verify: failed result=%d",
-                st.result);
-
-            esp_wifi_disconnect();
+                "verify: authentication failed"
+            );
 
             goto cleanup_fail;
         }
 
+        // ----------------------------------------------------
+        // 找不到 AP
+        // ----------------------------------------------------
+
+        if (st.result == VERIFY_NO_AP)
+        {
+            *out_result = VERIFY_NO_AP;
+
+            ESP_LOGW(
+                TAG,
+                "verify: target AP not found"
+            );
+
+            goto cleanup_fail;
+        }
+
+        // ----------------------------------------------------
+        // 关联失败
+        // ----------------------------------------------------
+
+        if (st.result == VERIFY_ASSOC_FAIL)
+        {
+            *out_result = VERIFY_ASSOC_FAIL;
+
+            ESP_LOGW(
+                TAG,
+                "verify: association failed"
+            );
+
+            goto cleanup_fail;
+        }
+
+        // ----------------------------------------------------
+        // 第一次连接 5 秒仍无结果
+        //
+        // 再尝试一次。
+        // ----------------------------------------------------
+
+        if (!retry_done && waited >= 5000)
+        {
+            retry_done = true;
+
+            ESP_LOGW(
+                TAG,
+                "verify: no IP after 5s, retrying Wi-Fi connection"
+            );
+
+            esp_wifi_disconnect();
+
+            vTaskDelay(
+                pdMS_TO_TICKS(300)
+            );
+
+            err = esp_wifi_connect();
+
+            if (err != ESP_OK)
+            {
+                ESP_LOGW(
+                    TAG,
+                    "verify: retry connect failed: %s",
+                    esp_err_to_name(err)
+                );
+            }
+        }
+
+        // ----------------------------------------------------
+        // 每 200ms 检查一次
+        // ----------------------------------------------------
+
         vTaskDelay(
-            pdMS_TO_TICKS(200));
+            pdMS_TO_TICKS(200)
+        );
 
         waited += 200;
     }
+
+    // ========================================================
+    // 超时
+    // ========================================================
 
     *out_result = VERIFY_TIMEOUT;
 
     ESP_LOGW(
         TAG,
         "verify: timeout after %d ms",
-        waited);
+        waited
+    );
 
     esp_wifi_disconnect();
 
 cleanup_fail:
 
-    esp_event_handler_instance_unregister(
-        WIFI_EVENT,
-        WIFI_EVENT_STA_DISCONNECTED,
-        h_disconnect);
+    // ========================================================
+    // 注销事件
+    // ========================================================
 
-    esp_event_handler_instance_unregister(
-        IP_EVENT,
-        IP_EVENT_STA_GOT_IP,
-        h_got_ip);
+    if (h_disconnect)
+    {
+        esp_event_handler_instance_unregister(
+            WIFI_EVENT,
+            WIFI_EVENT_STA_DISCONNECTED,
+            h_disconnect
+        );
+
+        h_disconnect = NULL;
+    }
+
+    if (h_got_ip)
+    {
+        esp_event_handler_instance_unregister(
+            IP_EVENT,
+            IP_EVENT_STA_GOT_IP,
+            h_got_ip
+        );
+
+        h_got_ip = NULL;
+    }
 
     return false;
 
 cleanup_success:
 
-    esp_event_handler_instance_unregister(
-        WIFI_EVENT,
-        WIFI_EVENT_STA_DISCONNECTED,
-        h_disconnect);
+    // ========================================================
+    // 成功：只注销事件。
+    //
+    // 不在这里关闭 AP。
+    // 后面的 verify_task() 会保存 NVS，
+    // 然后按原来的流程 esp_restart()。
+    // ========================================================
 
-    esp_event_handler_instance_unregister(
-        IP_EVENT,
-        IP_EVENT_STA_GOT_IP,
-        h_got_ip);
+    if (h_disconnect)
+    {
+        esp_event_handler_instance_unregister(
+            WIFI_EVENT,
+            WIFI_EVENT_STA_DISCONNECTED,
+            h_disconnect
+        );
+
+        h_disconnect = NULL;
+    }
+
+    if (h_got_ip)
+    {
+        esp_event_handler_instance_unregister(
+            IP_EVENT,
+            IP_EVENT_STA_GOT_IP,
+            h_got_ip
+        );
+
+        h_got_ip = NULL;
+    }
 
     return true;
 }
@@ -1203,26 +1379,36 @@ static void verify_task(void *arg)
     snprintf(
         s_save_msg,
         sizeof(s_save_msg),
-        "Wi-Fi configured successfully. Restarting...");
+        "Wi-Fi configured successfully.");
 
     s_save_inflight = 0;
 
     portEXIT_CRITICAL(
         &s_save_mux);
 
-    // 给浏览器 1~1.5 秒显示成功页面
-    vTaskDelay(
-        pdMS_TO_TICKS(1200));
+    ProvisionUI_ShowSuccess();
+
+    // --------------------------------------------------------
+    // 不再 esp_restart()
+    // --------------------------------------------------------
+    //
+    // WifiProvision_StartAP() 会看到 SAVE_SUCCESS，
+    // 然后负责：
+    //
+    //   1. 停止 HTTP
+    //   2. 关闭配网 AP
+    //   3. 切换到正常 STA
+    //   4. 返回 NetSync
+    //
+    // 这样屏幕不会黑屏。
+    // --------------------------------------------------------
 
     free(payload);
 
     ESP_LOGI(
         TAG,
-        "restarting now");
+        "provisioning finished, handing control back to NetSync");
 
-    esp_restart();
-
-    // 理论上不会执行
     vTaskDelete(NULL);
 }
 
@@ -1452,6 +1638,9 @@ static esp_err_t h_save(
         "/save: ssid='%s', password_length=%d",
         ssid,
         (int)strlen(pass));
+    ProvisionUI_SetWifiName(ssid);
+
+    ProvisionUI_ShowConnecting();
 
     portENTER_CRITICAL(
         &s_save_mux);
@@ -2198,7 +2387,7 @@ static void provision_scan_wifi(void)
 // 启动 AP 配网
 // ============================================================
 
-void WifiProvision_StartAP(void)
+bool WifiProvision_StartAP(void)
 {
     ESP_LOGI(
         TAG,
@@ -2239,7 +2428,7 @@ void WifiProvision_StartAP(void)
             TAG,
             "failed to create Wi-Fi netif");
 
-        return;
+        return false;
     }
 
     // --------------------------------------------------------
@@ -2561,13 +2750,94 @@ void WifiProvision_StartAP(void)
     }
 
     // --------------------------------------------------------
-    // 保持运行，直到 verify_task 成功后 restart
+    // 保持配网服务运行。
+    // verify_task 成功以后会把 s_save_stage 设置为 SAVE_SUCCESS。
     // --------------------------------------------------------
 
     while (1)
     {
+        int stage;
+
+        portENTER_CRITICAL(
+            &s_save_mux
+        );
+
+        stage = s_save_stage;
+
+        portEXIT_CRITICAL(
+            &s_save_mux
+        );
+
+        // ----------------------------------------------------
+        // 配网成功
+        // ----------------------------------------------------
+
+        if (stage == SAVE_SUCCESS)
+        {
+            ESP_LOGI(
+                TAG,
+                "provisioning success detected"
+            );
+
+            break;
+        }
+
+        // ----------------------------------------------------
+        // 继续等待手机提交 Wi-Fi
+        // ----------------------------------------------------
 
         vTaskDelay(
-            pdMS_TO_TICKS(1000));
+            pdMS_TO_TICKS(200)
+        );
     }
+
+    // ========================================================
+    // 配网成功：开始退出 AP 模式
+    // ========================================================
+
+    ESP_LOGI(
+        TAG,
+        "stopping provisioning HTTP server"
+    );
+
+    if (server)
+    {
+        httpd_stop(server);
+        server = NULL;
+    }
+
+    // --------------------------------------------------------
+    // 从 APSTA 切换到普通 STA
+    //
+    // 注意：这一步发生在 Wi-Fi 已经验证成功以后。
+    // 和之前错误的 try_sta_connect() 修改不同。
+    // --------------------------------------------------------
+
+    ESP_LOGI(
+        TAG,
+        "switching APSTA -> STA"
+    );
+
+    esp_err_t mode_err =
+        esp_wifi_set_mode(
+            WIFI_MODE_STA
+        );
+
+    if (mode_err != ESP_OK)
+    {
+        ESP_LOGE(
+            TAG,
+            "failed to switch to STA mode: %s",
+            esp_err_to_name(mode_err)
+        );
+
+        return false;
+    }
+
+    ESP_LOGI(
+        TAG,
+        "provisioning AP stopped, normal STA mode ready"
+    );
+
+    return true;
 }

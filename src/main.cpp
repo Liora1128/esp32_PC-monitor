@@ -10,6 +10,7 @@
 #include "freertos/task.h"
 
 #include "lvgl.h"
+
 #include "driver/gpio.h"
 #include "esp_log.h"
 #include "esp_system.h"
@@ -19,6 +20,7 @@
 #include "My_Button.h"
 #include "lib/RtosTasks/freertos.h"
 #include "Dashboard.h"
+#include "ProvisionUI.h"
 
 // ============================================================
 // LVGL display
@@ -77,14 +79,7 @@ static void lvgl_init(void)
 }
 
 // ============================================================
-// BOOT 长按 5s 清 WiFi 任务
-//
-// 这里不再自己做 GPIO 轮询 / ISR，全部依赖 My_Button 中断驱动：
-//   - GPIO1 (BOOT) 已经被 My_Button_Init() 装好了双边沿 ISR
-//   - 按住 5s 后 My_Button 会推一个 KEY_HOLD_5S 事件到队列
-//   - 本任务阻塞读，拿到这个事件就清 NVS 凭据 + esp_restart()
-//
-// CPU 不轮询，My_Button 的 esp_timer 5s 触发后自动唤醒这里。
+// BOOT 长按 5 秒清除 Wi-Fi
 // ============================================================
 
 static void boot_hold_task(void *arg)
@@ -92,25 +87,115 @@ static void boot_hold_task(void *arg)
     (void)arg;
 
     KeyEvent ev;
+
     while (1) {
-        KeyState st = My_Button_GetEvent(&ev, portMAX_DELAY);
-        if (st != KEY_HOLD_5S) continue;
 
-        // 只对 BOOT (GPIO1) 关心，其它 pin 上的 KEY_HOLD_5S 忽略
-        // （理论上三个 pin 都能触发，但只有 BOOT 配 NVS 操作）。
-        if (ev.pin != GPIO_NUM_1) continue;
+        KeyState st =
+            My_Button_GetEvent(
+                &ev,
+                portMAX_DELAY
+            );
 
-        ESP_LOGW("main", "BOOT held for 5 seconds");
-        ESP_LOGW("main", "clearing saved Wi-Fi credentials");
+        if (st != KEY_HOLD_5S)
+            continue;
+
+        if (ev.pin != GPIO_NUM_1)
+            continue;
+
+        ESP_LOGW(
+            "main",
+            "BOOT held for 5 seconds"
+        );
+
+        ESP_LOGW(
+            "main",
+            "clearing saved Wi-Fi credentials"
+        );
 
         WifiProvision_ClearCredentials();
 
-        vTaskDelay(pdMS_TO_TICKS(100));
+        vTaskDelay(
+            pdMS_TO_TICKS(100)
+        );
 
-        ESP_LOGW("main", "restarting into provisioning mode");
+        ESP_LOGW(
+            "main",
+            "restarting into provisioning mode"
+        );
 
         esp_restart();
     }
+}
+
+// ============================================================
+// 网络后台任务
+// ============================================================
+//
+// 非常重要：
+//
+// 原来的代码直接：
+//
+//     NetSync_StartBackground();
+//
+// 这个函数在没有 Wi-Fi 时会进入
+// WifiProvision_StartAP()，而 StartAP() 本身一直运行。
+//
+// 所以 main task 被卡住，LVGL 也就停止。
+// 最终屏幕就一直黑。
+//
+// 现在把它放到独立 FreeRTOS task。
+// main task 专门负责 LVGL。
+// ============================================================
+
+static void network_task(void *arg)
+{
+    (void)arg;
+
+    ESP_LOGI(
+        "main",
+        "network task started"
+    );
+
+    NetSync_StartBackground();
+
+    ESP_LOGI(
+        "main",
+        "network task finished"
+    );
+
+    vTaskDelete(NULL);
+}
+
+// ============================================================
+// Dashboard 切换
+// ============================================================
+
+static bool s_dashboard_started = false;
+
+static void try_switch_to_dashboard()
+{
+    if (s_dashboard_started)
+        return;
+
+    NetSync_State state =
+        NetSync_GetState();
+
+    if (state != NETSYNC_STATE_READY)
+        return;
+
+    ESP_LOGI(
+        "main",
+        "network ready -> starting Dashboard"
+    );
+
+    // 删除配网页面
+    lv_obj_clean(
+        lv_scr_act()
+    );
+
+    Dashboard_Start();
+
+    s_dashboard_started = true;
 }
 
 // ============================================================
@@ -135,37 +220,19 @@ extern "C" void app_main(void)
 
     lvgl_init();
 
-    // --------------------------------------------------------
-    // 2. 创建监控 Dashboard
-    //
-    // Dashboard 本身不创建 UDP socket。
-    // UDP 由 NetSync 接收：
-    //
-    // PC
-    //  ↓ UDP 9999
-    // NetSync
-    //  ↓
-    // NetSync_Data
-    //  ↓
-    // Dashboard
-    // --------------------------------------------------------
-
-    Dashboard_Start();
-
-    // 给 LVGL / LCD 一点初始化时间
-    vTaskDelay(
-        pdMS_TO_TICKS(300)
+    ESP_LOGI(
+        "main",
+        "display initialized"
     );
 
     // --------------------------------------------------------
-    // 3. 启动 BOOT 5s 长按监听任务
-    //
-    // 5s 长按的 GPIO 边沿检测、定时全部由 My_Button 中断模块完成，
-    // 这里只需要一个轻量 task 订阅 KEY_HOLD_5S 事件去清 WiFi。
-    //
-    // 注意：My_Button_Init() 已经在步骤 1 里把 GPIO 1 装好了
-    // 输入上拉 + 双边沿 ISR + 5s esp_timer, 这里不需要再做任何
-    // GPIO 配置。
+    // 2. 创建配网/启动动画
+    // --------------------------------------------------------
+
+    ProvisionUI_Start();
+
+    // --------------------------------------------------------
+    // 3. BOOT 5 秒监听
     // --------------------------------------------------------
 
     xTaskCreate(
@@ -179,74 +246,86 @@ extern "C" void app_main(void)
 
     ESP_LOGI(
         "main",
-        "BOOT 5s hold handler armed (subscribed to My_Button KEY_HOLD_5S)"
+        "BOOT 5s hold handler armed"
     );
 
     // --------------------------------------------------------
-    // 4. 启动网络系统
-    //
-    // NetSync_StartBackground() 会根据 NVS 状态自动选择：
-    //
-    // A. 没有 Wi-Fi 配置：
-    //
-    //      AP
-    //       ↓
-    //      DHCP
-    //       ↓
-    //      DNS
-    //       ↓
-    //      Captive Portal
-    //       ↓
-    //      手机配网
-    //       ↓
-    //      保存 NVS
-    //       ↓
-    //      esp_restart()
-    //
-    // B. 已经有 Wi-Fi：
-    //
-    //      读取 NVS
-    //       ↓
-    //      连接 Wi-Fi
-    //       ↓
-    //      启动 UDP 9999
-    //      启动 UDP 9998
-    //       ↓
-    //      正常监控模式
+    // 4. 网络后台任务
+    // --------------------------------------------------------
     //
     // 注意：
-    // 配网模式下 NetSync_StartBackground()
-    // 会停留在 WifiProvision_StartAP() 中，
-    // 直到成功配置后重启。
+    // 这里绝对不能直接调用
+    //
+    //     NetSync_StartBackground();
+    //
+    // 否则配网时又会阻塞 LVGL。
+    //
     // --------------------------------------------------------
 
-    ESP_LOGI(
-        "main",
-        "starting network subsystem"
-    );
+    BaseType_t ret =
+        xTaskCreate(
+            network_task,
+            "network",
+            8192,
+            NULL,
+            5,
+            NULL
+        );
 
-    NetSync_StartBackground();
+    if (ret != pdPASS) {
+
+        ESP_LOGE(
+            "main",
+            "failed to create network task"
+        );
+    }
 
     // --------------------------------------------------------
     // 5. LVGL 主循环
-    //
-    // 正常模式下：
-    //
-    //      NetSync 收 UDP 数据
-    //             ↓
-    //        NetSync_Data
-    //             ↓
-    //        Dashboard tick_cb
-    //             ↓
-    //           LVGL
-    //
-    // 配网模式下：
-    //      不会执行到这里，因为
-    //      WifiProvision_StartAP() 会一直运行，
-    //      成功后直接 esp_restart()
     // --------------------------------------------------------
 
     while (1) {
+
+        // ----------------------------------------------------
+        // 网络正常后切换 Dashboard
+        // ----------------------------------------------------
+
+        try_switch_to_dashboard();
+
+        // ----------------------------------------------------
+        // 配网动画
+        // ----------------------------------------------------
+
+        if (!s_dashboard_started) {
+
+            NetSync_State state =
+                NetSync_GetState();
+
+            if (state == NETSYNC_STATE_PROVISIONING)
+            {
+                // 没有保存 Wi-Fi：
+                // 真正进入配网模式后才显示
+                // PCMonitor-Setup
+                ProvisionUI_ShowWaiting();
+            }
+            else if (state == NETSYNC_STATE_CONNECTING)
+            {
+                // 已经有保存的 Wi-Fi：
+                // 重启以后直接显示 Connecting
+                ProvisionUI_ShowConnecting();
+            }
+            else if (state == NETSYNC_STATE_STARTING)
+            {
+                // 刚开机，暂时什么都不切换。
+                // 保持 ProvisionUI_Start() 的 Starting...
+            }
+
+            ProvisionUI_Update();
+        }
+
+        // ----------------------------------------------------
+        // LVGL
+        // ----------------------------------------------------
 
         lv_tick_inc(50);
 
