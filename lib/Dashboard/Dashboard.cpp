@@ -37,6 +37,15 @@ static lv_obj_t *s_dn_speed_label;
 static lv_obj_t *s_cpu_temp_label;
 static lv_obj_t *s_uptime_home_label;
 
+static lv_obj_t *s_top_info_title;
+
+static bool s_show_cpu_temp = false;
+static uint8_t s_switch_seconds = 0;
+
+static uint8_t s_has_cpu_temp = 0;
+static uint8_t s_has_uptime = 0;
+static uint8_t s_cpu_temp = 0;
+
 // ============================================================================
 //  Helpers
 // ============================================================================
@@ -166,9 +175,9 @@ static void build_page_system(void)
     lv_obj_align(freq_card, LV_ALIGN_TOP_RIGHT, -6, 0);
 
     {
-        lv_obj_t *up_lbl = mk_lbl(freq_card, &lv_font_montserrat_14, COL_PURPLE, "UPTIME");
+        s_top_info_title = mk_lbl(freq_card, &lv_font_montserrat_14, COL_PURPLE, "UPTIME");
         // 此处修改uptime标签位置
-        lv_obj_align(up_lbl, LV_ALIGN_TOP_LEFT, 6, 0);
+        lv_obj_align(s_top_info_title, LV_ALIGN_TOP_LEFT, 6, 0);
 
         s_uptime_home_label = mk_lbl(freq_card, &lv_font_montserrat_16, COL_TEXT, "--");
         lv_obj_align(s_uptime_home_label, LV_ALIGN_TOP_MID, 0, 20);
@@ -249,11 +258,17 @@ static void tick_cb(lv_timer_t *t)
     if (ns && ns->valid) {
         s_cpu        = ns->cpu;
         s_cpu_freq   = ns->freq_mhz;
+        s_cpu_temp   = ns->cpu_temp;
+
         s_ram        = ns->ram_pct;
         s_up         = ns->up_bps;
         s_down       = ns->down_bps;
         s_uptime     = ns->uptime_sec;
-        s_have_data  = 1;
+
+        s_has_cpu_temp = ns->has_cpu_temp;
+        s_has_uptime   = ns->has_uptime;
+
+        s_have_data = 1;
     } else if (s_have_data) {
         s_uptime += 1;   // keep ticking locally between PC packets
     }
@@ -275,12 +290,172 @@ static void tick_cb(lv_timer_t *t)
         lv_label_set_text(s_cpu_temp_label, buf);
     }
 
-    if (s_uptime_home_label) {
-        if (s_uptime == 0) {
-            lv_label_set_text(s_uptime_home_label, "--");
-        } else {
-            fmt_uptime_days(buf, sizeof(buf), s_uptime);
-            lv_label_set_text(s_uptime_home_label, buf);
+    // ============================================================
+    // UPTIME / CPU TEMP 显示逻辑
+    //
+    // 只有 uptime
+    //     -> 一直显示 uptime
+    //
+    // 只有 cpu_t
+    //     -> 一直显示 CPU TEMP
+    //
+    // 两者都有
+    //     -> 每 3 秒切换一次
+    // ============================================================
+
+    if (s_uptime_home_label &&
+        s_top_info_title)
+    {
+        // --------------------------------------------------------
+        // 情况 1：两者都有
+        // --------------------------------------------------------
+
+        if (s_has_uptime &&
+            s_has_cpu_temp)
+        {
+            s_switch_seconds++;
+
+            if (s_switch_seconds >= 3)
+            {
+                s_switch_seconds = 0;
+                s_show_cpu_temp =
+                    !s_show_cpu_temp;
+            }
+
+            if (s_show_cpu_temp)
+            {
+                // CPU TEMP
+
+                lv_label_set_text(
+                    s_top_info_title,
+                    "CPU TEMP"
+                );
+
+                lv_snprintf(
+                    buf,
+                    sizeof(buf),
+                    "%u°C",
+                    (unsigned int)s_cpu_temp
+                );
+
+                lv_label_set_text(
+                    s_uptime_home_label,
+                    buf
+                );
+            }
+            else
+            {
+                // UPTIME
+
+                lv_label_set_text(
+                    s_top_info_title,
+                    "UPTIME"
+                );
+
+                if (s_uptime == 0)
+                {
+                    lv_label_set_text(
+                        s_uptime_home_label,
+                        "--"
+                    );
+                }
+                else
+                {
+                    fmt_uptime_days(
+                        buf,
+                        sizeof(buf),
+                        s_uptime
+                    );
+
+                    lv_label_set_text(
+                        s_uptime_home_label,
+                        buf
+                    );
+                }
+            }
+        }
+
+        // --------------------------------------------------------
+        // 情况 2：只有 CPU TEMP
+        // --------------------------------------------------------
+
+        else if (s_has_cpu_temp)
+        {
+            s_switch_seconds = 0;
+            s_show_cpu_temp = true;
+
+            lv_label_set_text(
+                s_top_info_title,
+                "CPU TEMP"
+            );
+
+            lv_snprintf(
+                buf,
+                sizeof(buf),
+                "%u°C",
+                (unsigned int)s_cpu_temp
+            );
+
+            lv_label_set_text(
+                s_uptime_home_label,
+                buf
+            );
+        }
+
+        // --------------------------------------------------------
+        // 情况 3：只有 UPTIME
+        // --------------------------------------------------------
+
+        else if (s_has_uptime)
+        {
+            s_switch_seconds = 0;
+            s_show_cpu_temp = false;
+
+            lv_label_set_text(
+                s_top_info_title,
+                "UPTIME"
+            );
+
+            if (s_uptime == 0)
+            {
+                lv_label_set_text(
+                    s_uptime_home_label,
+                    "--"
+                );
+            }
+            else
+            {
+                fmt_uptime_days(
+                    buf,
+                    sizeof(buf),
+                    s_uptime
+                );
+
+                lv_label_set_text(
+                    s_uptime_home_label,
+                    buf
+                );
+            }
+        }
+
+        // --------------------------------------------------------
+        // 情况 4：两个都没有
+        // --------------------------------------------------------
+
+        else
+        {
+            s_switch_seconds = 0;
+            s_show_cpu_temp = false;
+
+            lv_label_set_text(
+                s_top_info_title,
+                "SYSTEM"
+            );
+
+            lv_label_set_text(
+                s_uptime_home_label,
+                "--"
+            );
         }
     }
 

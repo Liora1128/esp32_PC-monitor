@@ -47,6 +47,9 @@ typedef struct
 
     uint8_t   cpu_temp;
 
+    // 本次数据包是否包含对应字段
+    uint8_t   has_cpu_temp;
+
     uint8_t   ram_pct;
 
     float     ram_used_gb;
@@ -70,6 +73,9 @@ typedef struct
     char      nic_name[16];
 
     uint32_t  uptime_sec;
+
+    // 本次数据包是否包含 uptime
+    uint8_t   has_uptime;
 
 } NetSync_Data;
 

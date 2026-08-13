@@ -565,6 +565,22 @@ static void parse_json_line(
     NetSync_Data *d =
         &s_data;
 
+    // ========================================================
+    // 检查本次数据包是否真的包含对应字段
+    // ========================================================
+
+    d->has_cpu_temp =
+        strstr(
+            json,
+            "\"cpu_t\":"
+        ) != NULL;
+
+    d->has_uptime =
+        strstr(
+            json,
+            "\"uptime\":"
+        ) != NULL;
+
     d->cpu =
         (uint8_t)json_int(
             json,
