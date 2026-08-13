@@ -323,6 +323,22 @@ extern "C" void app_main(void)
                 ProvisionUI_ShowConnecting();
             }
             else if (
+                state == NETSYNC_STATE_CONNECT_SUCCESS
+            )
+            {
+                const char *ssid =
+                    NetSync_GetProvisionSSID();
+
+                if (ssid && ssid[0] != '\0')
+                {
+                    ProvisionUI_SetWifiName(
+                        ssid
+                    );
+                }
+
+                ProvisionUI_ShowSuccess();
+            }
+            else if (
                 state == NETSYNC_STATE_PROVISION_ERROR
             )
             {

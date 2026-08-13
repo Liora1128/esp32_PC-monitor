@@ -1216,15 +1216,27 @@ void NetSync_StartBackground(void)
             return;
         }
 
+        // ----------------------------------------------------
+        // 已保存 Wi-Fi 正常连接成功
+        //
+        // 不立即进入 READY。
+        // 先给屏幕一个完整的"连接成功"过渡。
+        // ----------------------------------------------------
+
         s_net_state =
-            NETSYNC_STATE_READY;
+            NETSYNC_STATE_CONNECT_SUCCESS;
+
+        vTaskDelay(
+            pdMS_TO_TICKS(1200)
+        );
     }
 
     // --------------------------------------------------------
-    // Wi-Fi 正常连接后，启动业务 UDP
+    // Wi-Fi 正常连接后，进入 READY
     // --------------------------------------------------------
 
-    s_net_state = NETSYNC_STATE_READY;
+    s_net_state =
+        NETSYNC_STATE_READY;
 
     ESP_LOGI(
         TAG,

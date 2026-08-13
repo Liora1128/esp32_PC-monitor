@@ -21,7 +21,10 @@ typedef enum
     // 连接失败，等待用户重新选择 / 输入密码
     NETSYNC_STATE_PROVISION_ERROR,
 
-    // Wi-Fi 验证成功，显示成功页
+    // 已保存 Wi-Fi，正常启动连接成功
+    NETSYNC_STATE_CONNECT_SUCCESS,
+
+    // 配网成功
     NETSYNC_STATE_PROVISION_SUCCESS,
 
     // 正常运行
