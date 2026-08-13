@@ -12,13 +12,12 @@ typedef enum
 {
     NETSYNC_STATE_STARTING = 0,
 
-    // 正在连接已经保存的 Wi-Fi
     NETSYNC_STATE_CONNECTING,
 
-    // 正在进入配网
     NETSYNC_STATE_PROVISIONING,
 
-    // 已经建立正常 Wi-Fi
+    NETSYNC_STATE_PROVISION_SUCCESS,
+
     NETSYNC_STATE_READY
 
 } NetSync_State;
@@ -75,6 +74,10 @@ void NetSync_StartBackground(void);
 // ============================================================
 
 NetSync_State NetSync_GetState(void);
+
+// 供 wifi_provision.cpp 更新"正在连接"状态。
+// 这里只修改网络状态，不碰 LVGL。
+void NetSync_SetState(NetSync_State state);
 
 // ============================================================
 // 获取 PC 数据

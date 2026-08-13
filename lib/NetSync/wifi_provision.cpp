@@ -1,5 +1,6 @@
 #include "wifi_provision.h"
 #include "ProvisionUI.h"
+#include "NetSync.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -813,9 +814,6 @@ static bool try_sta_connect(
     // 已经等待的时间，单位 ms
     int waited = 0;
 
-    // 提到 goto 之前，避免跨越初始化
-    bool retry_done = false;
-
     // ========================================================
     // 注册 Wi-Fi 断开事件
     // ========================================================
@@ -1034,36 +1032,23 @@ static bool try_sta_connect(
         }
 
         // ----------------------------------------------------
-        // 第一次连接 5 秒仍无结果
+        // 其他断开
         //
-        // 再尝试一次。
+        // 任何非认证/找不到/关联失败的断开都直接退出本次尝试，
+        // 让 verify_task() 在新的 try_sta_connect() 里再发。
         // ----------------------------------------------------
 
-        if (!retry_done && waited >= 5000)
+        if (st.result == VERIFY_OTHER)
         {
-            retry_done = true;
+            *out_result = VERIFY_OTHER;
 
             ESP_LOGW(
                 TAG,
-                "verify: no IP after 5s, retrying Wi-Fi connection"
+                "verify: connection attempt failed, "
+                "retry from a fresh session"
             );
 
-            esp_wifi_disconnect();
-
-            vTaskDelay(
-                pdMS_TO_TICKS(300)
-            );
-
-            err = esp_wifi_connect();
-
-            if (err != ESP_OK)
-            {
-                ESP_LOGW(
-                    TAG,
-                    "verify: retry connect failed: %s",
-                    esp_err_to_name(err)
-                );
-            }
+            goto cleanup_fail;
         }
 
         // ----------------------------------------------------
@@ -1178,11 +1163,49 @@ static void verify_task(void *arg)
     verify_result_t result =
         VERIFY_NONE;
 
-    bool ok = try_sta_connect(
-        ssid,
-        pass,
-        VERIFY_TIMEOUT_MS,
-        &result);
+    // ========================================================
+    // 一次提交级别的多次尝试
+    //
+    // 每次 try_sta_connect() 都是全新注册事件、
+    // 全新 disconnect+connect，不会被上一次的
+    // 中间状态拖死。
+    // ========================================================
+
+    bool ok = false;
+
+    for (int attempt = 1; attempt <= 3; attempt++)
+    {
+        result = VERIFY_NONE;
+
+        ESP_LOGI(
+            TAG,
+            "Wi-Fi verification attempt %d/3",
+            attempt
+        );
+
+        ok = try_sta_connect(
+            ssid,
+            pass,
+            VERIFY_TIMEOUT_MS,
+            &result
+        );
+
+        if (ok)
+            break;
+
+        ESP_LOGW(
+            TAG,
+            "verification attempt %d failed, "
+            "preparing a fresh retry",
+            attempt
+        );
+
+        esp_wifi_disconnect();
+
+        vTaskDelay(
+            pdMS_TO_TICKS(500)
+        );
+    }
 
     if (!ok)
     {
@@ -1386,7 +1409,11 @@ static void verify_task(void *arg)
     portEXIT_CRITICAL(
         &s_save_mux);
 
-    ProvisionUI_ShowSuccess();
+    // 通知 main 循环切到成功页 (PROVISION_SUCCESS)
+    // 网络 task 不直接操作 LVGL。
+    NetSync_SetState(
+        NETSYNC_STATE_PROVISION_SUCCESS
+    );
 
     // --------------------------------------------------------
     // 不再 esp_restart()
@@ -1664,6 +1691,11 @@ static esp_err_t h_save(
     s_save_inflight = 1;
     s_save_stage = SAVE_VERIFYING;
     s_save_msg[0] = '\0';
+
+    // 通知 main 循环切换到 Connecting...
+    NetSync_SetState(
+        NETSYNC_STATE_CONNECTING
+    );
 
     portEXIT_CRITICAL(
         &s_save_mux);

@@ -45,6 +45,11 @@ NetSync_State NetSync_GetState(void)
     return s_net_state;
 }
 
+void NetSync_SetState(NetSync_State state)
+{
+    s_net_state = state;
+}
+
 static EventGroupHandle_t s_wifi_event_group;
 
 #define WIFI_CONNECTED_BIT BIT0
@@ -991,6 +996,13 @@ void NetSync_StartBackground(void)
         ESP_LOGI(
             TAG,
             "provisioning successful"
+        );
+
+        s_net_state =
+            NETSYNC_STATE_PROVISION_SUCCESS;
+
+        vTaskDelay(
+            pdMS_TO_TICKS(1500)
         );
 
         s_net_state =

@@ -314,6 +314,11 @@ extern "C" void app_main(void)
                 // 重启以后直接显示 Connecting
                 ProvisionUI_ShowConnecting();
             }
+            else if (state == NETSYNC_STATE_PROVISION_SUCCESS)
+            {
+                // Wi-Fi 验证成功，正在显示成功页
+                ProvisionUI_ShowSuccess();
+            }
             else if (state == NETSYNC_STATE_STARTING)
             {
                 // 刚开机，暂时什么都不切换。
