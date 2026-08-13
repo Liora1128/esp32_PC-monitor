@@ -1214,27 +1214,76 @@ static void verify_task(void *arg)
             TAG,
             "verify failed: ssid='%s', result=%d",
             ssid,
-            result);
+            result
+        );
+
+        // ------------------------------------------------
+        // 根据失败原因生成 UI 提示
+        // ------------------------------------------------
+
+        const char *ui_error =
+            "Connection failed";
+
+        switch (result)
+        {
+            case VERIFY_AUTH_FAIL:
+                ui_error =
+                    "Wrong password";
+                break;
+
+            case VERIFY_NO_AP:
+                ui_error =
+                    "Wi-Fi not found";
+                break;
+
+            case VERIFY_ASSOC_FAIL:
+                ui_error =
+                    "Wi-Fi connection failed";
+                break;
+
+            case VERIFY_TIMEOUT:
+                ui_error =
+                    "Connection timeout";
+                break;
+
+            default:
+                ui_error =
+                    "Connection failed";
+                break;
+        }
+
+        NetSync_SetProvisionError(
+            ui_error
+        );
+
+        NetSync_SetState(
+            NETSYNC_STATE_PROVISION_ERROR
+        );
 
         portENTER_CRITICAL(
-            &s_save_mux);
+            &s_save_mux
+        );
 
-        s_save_stage = SAVE_FAIL;
+        s_save_stage =
+            SAVE_FAIL;
 
         snprintf(
             s_save_msg,
             sizeof(s_save_msg),
             "%s",
-            verify_error_text(result));
+            verify_error_text(result)
+        );
 
         s_save_inflight = 0;
 
         portEXIT_CRITICAL(
-            &s_save_mux);
+            &s_save_mux
+        );
 
         free(payload);
 
         vTaskDelete(NULL);
+
         return;
     }
 
@@ -1692,7 +1741,22 @@ static esp_err_t h_save(
     s_save_stage = SAVE_VERIFYING;
     s_save_msg[0] = '\0';
 
-    // 通知 main 循环切换到 Connecting...
+    // --------------------------------------------------------
+    // 更新当前尝试连接的 Wi-Fi
+    // --------------------------------------------------------
+
+    NetSync_SetProvisionSSID(
+        ssid
+    );
+
+    NetSync_SetProvisionError(
+        ""
+    );
+
+    // --------------------------------------------------------
+    // 通知 LVGL：开始连接
+    // --------------------------------------------------------
+
     NetSync_SetState(
         NETSYNC_STATE_CONNECTING
     );

@@ -474,8 +474,39 @@ void ProvisionUI_ShowConnecting()
     );
 }
 
+// ============================================================// 连接失败
 // ============================================================
-// 设置“连接成功，准备重启”
+
+void ProvisionUI_ShowError(
+    const char *msg)
+{
+    if (!s_active)
+        return;
+
+    lv_obj_set_style_arc_color(
+        s_arc,
+        LV_COLOR_MAKE(244, 63, 94),
+        LV_PART_INDICATOR
+    );
+
+    lv_label_set_text(
+        s_title,
+        "Wi-Fi Error"
+    );
+
+    lv_obj_set_style_text_color(
+        s_title,
+        LV_COLOR_MAKE(244, 63, 94),
+        0
+    );
+
+    lv_label_set_text(
+        s_status,
+        msg ? msg : "Connection failed"
+    );
+}
+
+// ============================================================// 设置“连接成功，准备重启”
 // ============================================================
 
 void ProvisionUI_ShowSuccess()

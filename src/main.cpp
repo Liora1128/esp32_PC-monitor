@@ -310,13 +310,50 @@ extern "C" void app_main(void)
             }
             else if (state == NETSYNC_STATE_CONNECTING)
             {
-                // 已经有保存的 Wi-Fi：
-                // 重启以后直接显示 Connecting
+                const char *ssid =
+                    NetSync_GetProvisionSSID();
+
+                if (ssid && ssid[0] != '\0')
+                {
+                    ProvisionUI_SetWifiName(
+                        ssid
+                    );
+                }
+
                 ProvisionUI_ShowConnecting();
             }
-            else if (state == NETSYNC_STATE_PROVISION_SUCCESS)
+            else if (
+                state == NETSYNC_STATE_PROVISION_ERROR
+            )
             {
-                // Wi-Fi 验证成功，正在显示成功页
+                const char *ssid =
+                    NetSync_GetProvisionSSID();
+
+                if (ssid && ssid[0] != '\0')
+                {
+                    ProvisionUI_SetWifiName(
+                        ssid
+                    );
+                }
+
+                ProvisionUI_ShowError(
+                    NetSync_GetProvisionError()
+                );
+            }
+            else if (
+                state == NETSYNC_STATE_PROVISION_SUCCESS
+            )
+            {
+                const char *ssid =
+                    NetSync_GetProvisionSSID();
+
+                if (ssid && ssid[0] != '\0')
+                {
+                    ProvisionUI_SetWifiName(
+                        ssid
+                    );
+                }
+
                 ProvisionUI_ShowSuccess();
             }
             else if (state == NETSYNC_STATE_STARTING)

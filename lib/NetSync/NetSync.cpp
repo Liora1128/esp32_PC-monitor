@@ -50,6 +50,64 @@ void NetSync_SetState(NetSync_State state)
     s_net_state = state;
 }
 
+// ============================================================
+// 配网 UI 信息
+// ============================================================
+
+static char s_provision_ssid[64] = {0};
+
+static char s_provision_error[128] = {0};
+
+void NetSync_SetProvisionSSID(
+    const char *ssid)
+{
+    if (!ssid)
+    {
+        s_provision_ssid[0] = '\0';
+        return;
+    }
+
+    strncpy(
+        s_provision_ssid,
+        ssid,
+        sizeof(s_provision_ssid) - 1
+    );
+
+    s_provision_ssid[
+        sizeof(s_provision_ssid) - 1
+    ] = '\0';
+}
+
+const char *NetSync_GetProvisionSSID(void)
+{
+    return s_provision_ssid;
+}
+
+void NetSync_SetProvisionError(
+    const char *msg)
+{
+    if (!msg)
+    {
+        s_provision_error[0] = '\0';
+        return;
+    }
+
+    strncpy(
+        s_provision_error,
+        msg,
+        sizeof(s_provision_error) - 1
+    );
+
+    s_provision_error[
+        sizeof(s_provision_error) - 1
+    ] = '\0';
+}
+
+const char *NetSync_GetProvisionError(void)
+{
+    return s_provision_error;
+}
+
 static EventGroupHandle_t s_wifi_event_group;
 
 #define WIFI_CONNECTED_BIT BIT0

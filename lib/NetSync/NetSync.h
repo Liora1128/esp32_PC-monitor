@@ -12,12 +12,19 @@ typedef enum
 {
     NETSYNC_STATE_STARTING = 0,
 
+    // 正在连接用户选择的 Wi-Fi
     NETSYNC_STATE_CONNECTING,
 
+    // 等待手机配网
     NETSYNC_STATE_PROVISIONING,
 
+    // 连接失败，等待用户重新选择 / 输入密码
+    NETSYNC_STATE_PROVISION_ERROR,
+
+    // Wi-Fi 验证成功，显示成功页
     NETSYNC_STATE_PROVISION_SUCCESS,
 
+    // 正常运行
     NETSYNC_STATE_READY
 
 } NetSync_State;
@@ -75,9 +82,31 @@ void NetSync_StartBackground(void);
 
 NetSync_State NetSync_GetState(void);
 
-// 供 wifi_provision.cpp 更新"正在连接"状态。
-// 这里只修改网络状态，不碰 LVGL。
-void NetSync_SetState(NetSync_State state);
+void NetSync_SetState(
+    NetSync_State state
+);
+
+// ============================================================
+// 配网 UI 信息
+//
+// 注意：这里只保存数据，不直接操作 LVGL。
+// ============================================================
+
+// 设置当前正在尝试连接的 SSID
+void NetSync_SetProvisionSSID(
+    const char *ssid
+);
+
+// 获取当前正在尝试连接的 SSID
+const char *NetSync_GetProvisionSSID(void);
+
+// 设置配网失败提示
+void NetSync_SetProvisionError(
+    const char *msg
+);
+
+// 获取配网失败提示
+const char *NetSync_GetProvisionError(void);
 
 // ============================================================
 // 获取 PC 数据

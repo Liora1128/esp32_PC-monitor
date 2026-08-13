@@ -15,6 +15,10 @@ void ProvisionUI_ShowWaiting();
 
 void ProvisionUI_ShowConnecting();
 
+void ProvisionUI_ShowError(
+    const char *msg
+);
+
 void ProvisionUI_ShowSuccess();
 
 bool ProvisionUI_IsActive();
