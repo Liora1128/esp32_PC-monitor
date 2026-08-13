@@ -117,6 +117,20 @@ static int s_retry_num = 0;
 static NetSync_Data s_data;
 
 // ============================================================
+// PC / 9998 广播状态
+// ============================================================
+
+// true  = 允许 9998 广播
+// false = PC 已经连接，暂停 9998 广播
+static volatile bool s_hello_enabled = true;
+
+// 最近一次收到 PC 9999 数据的时间
+static volatile TickType_t s_last_pc_rx_tick = 0;
+
+// 超过这个时间没有收到 9999 数据，认为 PC 已离线
+#define PC_OFFLINE_TIMEOUT_MS 10000
+
+// ============================================================
 // Wi-Fi 正常模式连接
 // ============================================================
 
@@ -748,8 +762,8 @@ static void udp_recv_task(
             IPPROTO_UDP
         );
 
-    if (sock < 0) {
-
+    if (sock < 0)
+    {
         ESP_LOGE(
             TAG,
             "UDP socket failed"
@@ -776,12 +790,14 @@ static void udp_recv_task(
     addr.sin_addr.s_addr =
         htonl(INADDR_ANY);
 
-    if (bind(
+    if (
+        bind(
             sock,
             (struct sockaddr *)&addr,
             sizeof(addr)
-        ) < 0) {
-
+        ) < 0
+    )
+    {
         ESP_LOGE(
             TAG,
             "UDP bind failed on port %d",
@@ -804,9 +820,10 @@ static void udp_recv_task(
         RECV_BUF_SIZE
     ];
 
-    while (1) {
-
+    while (1)
+    {
         struct sockaddr_in from;
+
         socklen_t fl =
             sizeof(from);
 
@@ -825,14 +842,43 @@ static void udp_recv_task(
 
         buf[n] = '\0';
 
+        // ====================================================
+        // 收到 PC 的 9999 数据
+        //
+        // 第一次收到有效数据：
+        // 说明 PC 已经找到 ESP32
+        // 关闭 9998 广播
+        // ====================================================
+
+        if (s_hello_enabled)
+        {
+            s_hello_enabled = false;
+
+            ESP_LOGI(
+                TAG,
+                "PC detected on UDP %d, "
+                "stopping UDP %d broadcast",
+                UDP_PORT,
+                HELLO_PORT
+            );
+        }
+
+        // 更新最近一次收到 PC 数据的时间
+        s_last_pc_rx_tick =
+            xTaskGetTickCount();
+
+        // ====================================================
+        // 原来的 JSON 解析逻辑
+        // ====================================================
+
         char *line =
             buf;
 
         while (
             line &&
             *line
-        ) {
-
+        )
+        {
             char *eol =
                 strchr(
                     line,
@@ -842,9 +888,12 @@ static void udp_recv_task(
             if (eol)
                 *eol = '\0';
 
-            parse_json_line(
-                line
-            );
+            if (*line)
+            {
+                parse_json_line(
+                    line
+                );
+            }
 
             if (!eol)
                 break;
@@ -871,8 +920,8 @@ static void hello_task(
             IPPROTO_UDP
         );
 
-    if (sock < 0) {
-
+    if (sock < 0)
+    {
         ESP_LOGE(
             TAG,
             "hello socket failed"
@@ -913,43 +962,90 @@ static void hello_task(
 
     char msg[96];
 
-    while (1) {
+    while (1)
+    {
+        TickType_t now =
+            xTaskGetTickCount();
 
-        esp_netif_t *sta =
-            esp_netif_get_handle_from_ifkey(
-                "WIFI_STA_DEF"
-            );
+        // ====================================================
+        // PC 已经连接时，检查它是否还活着
+        // ====================================================
 
-        if (sta) {
-
-            esp_netif_ip_info_t ip;
+        if (!s_hello_enabled)
+        {
+            TickType_t last =
+                s_last_pc_rx_tick;
 
             if (
-                esp_netif_get_ip_info(
-                    sta,
-                    &ip
-                ) == ESP_OK &&
-                ip.ip.addr != 0
-            ) {
+                last != 0 &&
+                (
+                    now - last
+                ) >= pdMS_TO_TICKS(
+                    PC_OFFLINE_TIMEOUT_MS
+                )
+            )
+            {
+                s_hello_enabled = true;
 
-                int n =
-                    snprintf(
+                ESP_LOGW(
+                    TAG,
+                    "PC UDP %d timeout, "
+                    "restarting UDP %d broadcast",
+                    UDP_PORT,
+                    HELLO_PORT
+                );
+            }
+        }
+
+        // ====================================================
+        // 只有没有连接 PC 时才发送 9998
+        // ====================================================
+
+        if (s_hello_enabled)
+        {
+            esp_netif_t *sta =
+                esp_netif_get_handle_from_ifkey(
+                    "WIFI_STA_DEF"
+                );
+
+            if (sta)
+            {
+                esp_netif_ip_info_t ip;
+
+                if (
+                    esp_netif_get_ip_info(
+                        sta,
+                        &ip
+                    ) == ESP_OK &&
+                    ip.ip.addr != 0
+                )
+                {
+                    int n =
+                        snprintf(
+                            msg,
+                            sizeof(msg),
+                            "%s " IPSTR " %d",
+                            HELLO_MAGIC,
+                            IP2STR(&ip.ip),
+                            seq++
+                        );
+
+                    sendto(
+                        sock,
                         msg,
-                        sizeof(msg),
-                        "%s " IPSTR " %d",
-                        HELLO_MAGIC,
-                        IP2STR(&ip.ip),
-                        seq++
+                        n,
+                        0,
+                        (struct sockaddr *)&dst,
+                        sizeof(dst)
                     );
 
-                sendto(
-                    sock,
-                    msg,
-                    n,
-                    0,
-                    (struct sockaddr *)&dst,
-                    sizeof(dst)
-                );
+                    ESP_LOGD(
+                        TAG,
+                        "UDP %d broadcast: %s",
+                        HELLO_PORT,
+                        msg
+                    );
+                }
             }
         }
 
@@ -969,6 +1065,13 @@ void NetSync_StartBackground(void)
 {
     s_net_state =
         NETSYNC_STATE_STARTING;
+
+    // 每次启动网络系统时默认允许 9998 广播
+    s_hello_enabled = true;
+
+    // 还没有收到 PC 数据
+    s_last_pc_rx_tick = 0;
+
     ESP_LOGI(
         TAG,
         "network subsystem start"
