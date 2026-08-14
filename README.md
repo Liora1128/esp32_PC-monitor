@@ -42,7 +42,8 @@ PC 端通过 UDP 广播把监控数据投递给 ESP32,ESP32 在局域网里开�
 - 💾 **磁盘读写速率** (KB/s)
 - 📺 **240×240 深色卡片 UI**,LVGL 8.3 绘制,1 Hz 定时刷新
 - 📶 **Wi-Fi Captive Portal 配网** — 扫描附近热点 → 选择 → 输入密码 → 自动校验 → 自动重启
-- 🔁 **热插拔 PC** — PC 离线 10 秒后,ESP32 自动恢复 `UDP 9998` 广播,等待新的 PC 上线
+- 🔁 **热插拔 PC** — PC 离线 10 秒后,Dashboard 自动标记 `SYSTEM --`,等待新 PC 上线;新 PC 用 mDNS 发现 ESP32 后即可恢复数据
+- 📡 **mDNS 服务公告** — ESP32 启动后以 `pcmonitor.local` 身份在局域网内广播 `_pcmonitor._udp` 服务(端口 9999),PC 端可通过域名自动找到设备,无需查 IP
 - 🧹 **BOOT 5 秒清 Wi-Fi** — 免重刷,随时重置
 
 ---
@@ -188,7 +189,7 @@ ESP32S3/
 | ---- | ---- |
 | `1.3TFT`     | SPI 总线配置 (27 MHz 写 / 16 MHz 读)、ST7789 复位时序、背光 LEDC PWM |
 | `My_Button`  | 3 个 GPIO 按键的事件队列,支持短按 / 长按 / 双击 / 5 秒 hold |
-| `NetSync`    | Wi-Fi 连接状态机、UDP 9998/9999 收发、JSON 解析 |
+| `NetSync`    | Wi-Fi 连接状态机、mDNS 服务公告 + UDP 9999 收发、JSON 解析 |
 | `wifi_provision` | AP 模式 + 内嵌 HTML 配网页面 + NVS 凭据存储 |
 | `Provision_UI` | 配网阶段的 LVGL 界面 (提示 SSID / 连接中 / 失败 / 成功) |
 | `Dashboard`  | 主监控 UI (1 Hz tick 刷新所有数字) |
@@ -339,8 +340,9 @@ pip install psutil pynvml
 PC 端示例:每秒一次,把监控数据以 JSON 形式
 通过 UDP 发到 ESP32 的 9999 端口。
 
-ESP32 的 IP 可以这样获取:
-  - 查看路由器 DHCP 客户端列表
+ESP32 的地址可以通过 mDNS 直接拿到:
+  - 如果 PC 支持 mDNS 解析:`pcmonitor.local`(推荐)
+  - 不支持时回退到查路由器 DHCP 客户端列表
   - 或者看 ESP32 串口日志里的 IP=...
 """
 
@@ -350,8 +352,11 @@ import time
 
 import psutil
 
-ESP32_IP   = "192.168.1.123"   # ← 改成你的 ESP32 实际 IP
+# 用 mDNS 域名,失败时再退回 IP
+ESP32_HOST = "pcmonitor.local"  # ← ESP32 启动后 mDNS 公告的主机名
 ESP32_PORT = 9999
+
+> 💡 Windows 自带的 `getaddrinfo` 在某些老版本上不解析 `.local`,如果解析失败可以把 `ESP32_HOST` 换成路由器分配的 IP。
 
 
 def build_payload():
@@ -395,7 +400,7 @@ def main():
         try:
             data = json.dumps(build_payload())
             sock.sendto(data.encode("utf-8"),
-                        (ESP32_IP, ESP32_PORT))
+                        (ESP32_HOST, ESP32_PORT))
         except Exception as e:
             print("send error:", e)
         time.sleep(1)
@@ -426,24 +431,22 @@ if __name__ == "__main__":
 
 ### 端口分配
 
-| 端口 | 方向          | 用途                                          |
-| ---- | ------------- | --------------------------------------------- |
-| 9998 | ESP32 → PC    | ESP32 广播 "我在这里" (HELLO),5 秒一次         |
-| 9999 | PC  → ESP32   | PC 推送监控 JSON,频率任意 (推荐 1 Hz)          |
-| 80   | 手机 → ESP32 AP | Captive Portal 配网页面 (仅 AP 模式下)        |
+| 端口 | 方向            | 用途                                              |
+| ---- | --------------- | ------------------------------------------------- |
+| 9999 | PC  → ESP32     | PC 推送监控 JSON,频率任意 (推荐 1 Hz)            |
+| 5353 | ESP32 ↔ PC (mDNS) | ESP32 以 `pcmonitor.local` 公告 `_pcmonitor._udp` |
+| 80   | 手机 → ESP32 AP | Captive Portal 配网页面 (仅 AP 模式下)            |
 
-### 1. HELLO 广播 (ESP32 → PC)
+### 1. mDNS 服务发现 (ESP32 → 局域网)
 
-```
-ESPSTATS_HELLO <IP> <seq>
-例:ESPSTATS_HELLO 192.168.1.123 42
-```
+ESP32 Wi-Fi 连上后,会以主机名 `pcmonitor` 启动 mDNS 客户端,并公告一个服务:
 
-ESP32 每 5 秒向 `255.255.255.255:9998` 广播一次,**直到收到 PC 的 9999 数据**才会停止。
-PC 收到后即可知道 ESP32 的 IP,直接开始发数据。
+- 实例名: `pcmonitor`
+- 服务类型: `_pcmonitor._udp.local`
+- 端口: `9999`
 
-PC 端收到任意 `9999` 数据 → ESP32 自动停止 `9998` 广播。
-PC 端停止发数据超过 10 秒 → ESP32 自动恢复 `9998` 广播。
+PC 端用支持 mDNS 的方式查询 `_pcmonitor._udp.local` 即可拿到 ESP32 的 IP,无需在路由器里查 DHCP 列表。
+推荐直接用域名 `pcmonitor.local:9999` 作为目标地址(Windows 10+ / macOS / Linux 默认都支持)。
 
 ### 2. 监控 JSON (PC → ESP32)
 

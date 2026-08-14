@@ -1,6 +1,7 @@
 #include "NetSync.h"
 #include "wifi_provision.h"
 
+
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -13,6 +14,7 @@
 #include "esp_netif.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
+#include "mdns.h"
 
 #include "lwip/sockets.h"
 #include "lwip/inet.h"
@@ -24,12 +26,8 @@
 #define WIFI_MAX_RETRY       15
 #define WIFI_CONNECT_TIMEOUT 20000
 
-#define UDP_PORT             9999
-#define RECV_BUF_SIZE        1024
-
-#define HELLO_PORT           9998
-#define HELLO_PERIOD         5000
-#define HELLO_MAGIC          "ESPSTATS_HELLO"
+#define UDP_PORT 9999
+#define RECV_BUF_SIZE 1024
 
 static const char *TAG = "net";
 
@@ -116,19 +114,7 @@ static int s_retry_num = 0;
 
 static NetSync_Data s_data;
 
-// ============================================================
-// PC / 9998 广播状态
-// ============================================================
 
-// true  = 允许 9998 广播
-// false = PC 已经连接，暂停 9998 广播
-static volatile bool s_hello_enabled = true;
-
-// 最近一次收到 PC 9999 数据的时间
-static volatile TickType_t s_last_pc_rx_tick = 0;
-
-// 超过这个时间没有收到 9999 数据，认为 PC 已离线
-#define PC_OFFLINE_TIMEOUT_MS 10000
 
 // ============================================================
 // Wi-Fi 正常模式连接
@@ -212,6 +198,74 @@ static void wifi_event_handler(
             WIFI_CONNECTED_BIT
         );
     }
+}
+
+// ============================================================
+// mDNS
+// ============================================================
+
+static bool start_mdns()
+{
+    esp_err_t err = mdns_init();
+    if (err != ESP_OK) 
+    {
+        ESP_LOGE(
+            TAG,
+            "mdns_init failed: %s",
+            esp_err_to_name(err)
+        );
+        return false;
+    }
+
+    err = mdns_hostname_set("pcmonitor");
+
+    if (err != ESP_OK) 
+    {
+        ESP_LOGE(
+            TAG,
+            "mdns_hostname_set failed: %s",
+            esp_err_to_name(err)
+        );
+        mdns_free();
+        return false;
+    }
+
+    // 注册 UDP 9999 服务
+    //
+    // _pcmonitor._udp.local
+    //
+    // 以后树莓派除了可以解析：
+    //
+    // pcmonitor.local
+    //
+    // 也可以通过服务发现找到 9999。
+    err = mdns_service_add(
+        "PCMonitor",
+        "_pcmonitor",
+        "_udp",
+        UDP_PORT,
+        NULL,
+        0
+    );
+
+    if (err != ESP_OK)
+    {
+        ESP_LOGE(
+            TAG,
+            "mdns_service_add failed: %s",
+            esp_err_to_name(err)
+        );
+    }
+
+    ESP_LOGI(
+        TAG,
+        "mDNS started: pcmonitor.local, UDP %d",
+        UDP_PORT
+    );
+
+    return true;
+
+
 }
 
 // ============================================================
@@ -858,30 +912,6 @@ static void udp_recv_task(
 
         buf[n] = '\0';
 
-        // ====================================================
-        // 收到 PC 的 9999 数据
-        //
-        // 第一次收到有效数据：
-        // 说明 PC 已经找到 ESP32
-        // 关闭 9998 广播
-        // ====================================================
-
-        if (s_hello_enabled)
-        {
-            s_hello_enabled = false;
-
-            ESP_LOGI(
-                TAG,
-                "PC detected on UDP %d, "
-                "stopping UDP %d broadcast",
-                UDP_PORT,
-                HELLO_PORT
-            );
-        }
-
-        // 更新最近一次收到 PC 数据的时间
-        s_last_pc_rx_tick =
-            xTaskGetTickCount();
 
         // ====================================================
         // 原来的 JSON 解析逻辑
@@ -920,158 +950,6 @@ static void udp_recv_task(
     }
 }
 
-// ============================================================
-// UDP 9998：ESP32 -> LAN 广播 IP
-// ============================================================
-
-static void hello_task(
-    void *arg)
-{
-    (void)arg;
-
-    int sock =
-        socket(
-            AF_INET,
-            SOCK_DGRAM,
-            IPPROTO_UDP
-        );
-
-    if (sock < 0)
-    {
-        ESP_LOGE(
-            TAG,
-            "hello socket failed"
-        );
-
-        vTaskDelete(NULL);
-        return;
-    }
-
-    int broadcast = 1;
-
-    setsockopt(
-        sock,
-        SOL_SOCKET,
-        SO_BROADCAST,
-        &broadcast,
-        sizeof(broadcast)
-    );
-
-    struct sockaddr_in dst;
-
-    memset(
-        &dst,
-        0,
-        sizeof(dst)
-    );
-
-    dst.sin_family =
-        AF_INET;
-
-    dst.sin_port =
-        htons(HELLO_PORT);
-
-    dst.sin_addr.s_addr =
-        htonl(INADDR_BROADCAST);
-
-    int seq = 0;
-
-    char msg[96];
-
-    while (1)
-    {
-        TickType_t now =
-            xTaskGetTickCount();
-
-        // ====================================================
-        // PC 已经连接时，检查它是否还活着
-        // ====================================================
-
-        if (!s_hello_enabled)
-        {
-            TickType_t last =
-                s_last_pc_rx_tick;
-
-            if (
-                last != 0 &&
-                (
-                    now - last
-                ) >= pdMS_TO_TICKS(
-                    PC_OFFLINE_TIMEOUT_MS
-                )
-            )
-            {
-                s_hello_enabled = true;
-
-                ESP_LOGW(
-                    TAG,
-                    "PC UDP %d timeout, "
-                    "restarting UDP %d broadcast",
-                    UDP_PORT,
-                    HELLO_PORT
-                );
-            }
-        }
-
-        // ====================================================
-        // 只有没有连接 PC 时才发送 9998
-        // ====================================================
-
-        if (s_hello_enabled)
-        {
-            esp_netif_t *sta =
-                esp_netif_get_handle_from_ifkey(
-                    "WIFI_STA_DEF"
-                );
-
-            if (sta)
-            {
-                esp_netif_ip_info_t ip;
-
-                if (
-                    esp_netif_get_ip_info(
-                        sta,
-                        &ip
-                    ) == ESP_OK &&
-                    ip.ip.addr != 0
-                )
-                {
-                    int n =
-                        snprintf(
-                            msg,
-                            sizeof(msg),
-                            "%s " IPSTR " %d",
-                            HELLO_MAGIC,
-                            IP2STR(&ip.ip),
-                            seq++
-                        );
-
-                    sendto(
-                        sock,
-                        msg,
-                        n,
-                        0,
-                        (struct sockaddr *)&dst,
-                        sizeof(dst)
-                    );
-
-                    ESP_LOGD(
-                        TAG,
-                        "UDP %d broadcast: %s",
-                        HELLO_PORT,
-                        msg
-                    );
-                }
-            }
-        }
-
-        vTaskDelay(
-            pdMS_TO_TICKS(
-                HELLO_PERIOD
-            )
-        );
-    }
-}
 
 // ============================================================
 // 总入口
@@ -1081,12 +959,6 @@ void NetSync_StartBackground(void)
 {
     s_net_state =
         NETSYNC_STATE_STARTING;
-
-    // 每次启动网络系统时默认允许 9998 广播
-    s_hello_enabled = true;
-
-    // 还没有收到 PC 数据
-    s_last_pc_rx_tick = 0;
 
     ESP_LOGI(
         TAG,
@@ -1247,12 +1119,23 @@ void NetSync_StartBackground(void)
         );
     }
 
-    // --------------------------------------------------------
-    // Wi-Fi 正常连接后，进入 READY
-    // --------------------------------------------------------
+// --------------------------------------------------------
+// Wi-Fi 已经连接成功
+// 现在发布 mDNS
+// --------------------------------------------------------
+
 
     s_net_state =
         NETSYNC_STATE_READY;
+
+    
+    if (!start_mdns())
+    {
+        ESP_LOGE(
+            TAG,
+            "mDNS start failed"
+        );
+    }
 
     ESP_LOGI(
         TAG,
@@ -1276,22 +1159,6 @@ void NetSync_StartBackground(void)
         );
     }
 
-    if (
-        xTaskCreate(
-            hello_task,
-            "netsync_hello",
-            2048,
-            NULL,
-            4,
-            NULL
-        ) != pdPASS
-    ) {
-
-        ESP_LOGE(
-            TAG,
-            "failed to start hello broadcaster"
-        );
-    }
 
     ESP_LOGI(
         TAG,

@@ -10,3 +10,6 @@ sdkconfig.old
 
 # PyInstaller auto-generated (re-created by main.py --pack)
 pc_monitor_server.spec
+
+# ESP_IDF Components
+components/
